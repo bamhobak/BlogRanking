@@ -262,7 +262,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 import crawler
 from crawler import get_blog_info, get_blog_posts, random_delay, search_rank, is_blog_private, resolve_blog_id, BotBlockedError
 
-VERSION = "v1.3.20"
+VERSION = "v1.3.21"
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config_rank.ini")
 IDS_FILE = os.path.join(BASE_DIR, "blog_ids.txt")
@@ -1851,8 +1851,28 @@ class BlogRankingApp:
         except Exception:
             return (0, 0, 0)
 
+    @staticmethod
+    def _sweep_update_temp():
+        """이전 업데이트가 남긴 임시 폴더(받은 zip·압축 해제본)를 지운다."""
+        import shutil
+        import tempfile
+        import time
+        try:
+            for d in Path(tempfile.gettempdir()).glob('br_upd_*'):
+                try:
+                    if d.is_dir() and time.time() - d.stat().st_mtime > 120:
+                        shutil.rmtree(d, ignore_errors=True)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
     def _check_for_update(self):
-        """시작할 때 한 번, 백그라운드로 최신 릴리스를 확인한다."""
+        """시작할 때 한 번, 백그라운드로 최신 릴리스를 확인한다.
+
+        새 버전이면 묻지 않고 바로 받아서 적용하고 재시작한다.
+        """
+        self._sweep_update_temp()
         try:
             r = requests.get(
                 f'https://api.github.com/repos/{_GITHUB_REPO}/releases/latest',
@@ -1871,79 +1891,38 @@ class BlogRankingApp:
                             if a['name'] == _ASSET_NAME), '')
                 self._update_info = {'version': latest, 'url': url,
                                      'notes': (data.get('body') or '').strip()}
-                self.root.after(0, self._show_update_dialog)
+                if not getattr(sys, 'frozen', False):
+                    self._log(f'새 버전 {latest} — 개발 환경에서는 자동 업데이트 안 함')
+                    return
+                self._log(f'새 버전 {latest} 발견 — 자동 업데이트를 시작합니다')
+                self.root.after(0, lambda: self._do_update(url, latest))
             else:
                 self._log(f'업데이트 확인: 최신 버전입니다 ({VERSION})')
         except Exception as e:
             self._log(f'업데이트 확인 실패: {e}')
-
-    def _show_update_dialog(self):
-        info = self._update_info
-        ver = info.get('version', '')
-
-        dlg = tk.Toplevel(self.root)
-        dlg.title('업데이트 알림')
-        dlg.resizable(False, False)
-        dlg.configure(bg=CARD)
-        dlg.transient(self.root)
-        dlg.grab_set()
-        w, h = px(380), px(210)
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        dlg.geometry(f'{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}')
-
-        tk.Label(dlg, text='새 버전이 있습니다', font=FONT_LG,
-                 bg=CARD, fg=FG).pack(pady=(px(28), px(6)))
-        tk.Label(dlg, text=f'{VERSION}   →   {ver}', font=FONT_NUMB,
-                 bg=CARD, fg=ACC).pack()
-        notes = info.get('notes', '')
-        if notes:
-            tk.Label(dlg, text=notes.splitlines()[0][:60], font=FONT_SM,
-                     bg=CARD, fg=FG_FAINT).pack(pady=(px(8), 0))
-
-        if not getattr(sys, 'frozen', False):
-            tk.Label(dlg, text='개발 환경에서는 자동 업데이트를 지원하지 않습니다.',
-                     font=FONT, bg=CARD, fg=STOP_BG).pack(pady=(px(14), 0))
-            tk.Button(dlg, text='확인', command=dlg.destroy, bg=SEL_BG, fg=FG,
-                      font=FONT, relief='flat', bd=0, padx=px(20), pady=px(5),
-                      cursor='hand2').pack(pady=px(14))
-            return
-
-        row = tk.Frame(dlg, bg=CARD)
-        row.pack(pady=(px(20), 0))
-
-        def start():
-            dlg.destroy()
-            self._do_update(info.get('url', ''), ver)
-
-        tk.Button(row, text='업데이트', command=start, bg=ACC, fg='white',
-                  font=FONT_B, relief='flat', bd=0, padx=px(22), pady=px(6),
-                  cursor='hand2', activebackground=ACC_ACT,
-                  activeforeground='white').pack(side=tk.LEFT, padx=(0, px(10)))
-        tk.Button(row, text='나중에', command=dlg.destroy, bg=CARD, fg='#475467',
-                  font=FONT, relief='flat', bd=0, padx=px(22), pady=px(6),
-                  cursor='hand2', highlightthickness=1,
-                  highlightbackground=FIELD_LN).pack(side=tk.LEFT)
 
     def _do_update(self, url: str, new_version: str):
         import tempfile
         import zipfile
 
         if not url:
-            messagebox.showerror('업데이트', f'{_ASSET_NAME} 파일을 찾을 수 없습니다.')
+            self._log(f'업데이트 실패: {_ASSET_NAME} 파일을 찾을 수 없습니다')
             return
 
         dlg = tk.Toplevel(self.root)
-        dlg.title('업데이트 중')
+        dlg.title('업데이트')
         dlg.resizable(False, False)
         dlg.configure(bg=CARD)
         dlg.transient(self.root)
         dlg.grab_set()
-        w, h = px(380), px(140)
+        w, h = px(380), px(170)
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
         dlg.geometry(f'{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}')
 
+        tk.Label(dlg, text=f'{VERSION}   →   {new_version}', font=FONT_NUMB,
+                 bg=CARD, fg=ACC).pack(pady=(px(18), 0))
         lbl = tk.Label(dlg, text='준비 중...', font=FONT, bg=CARD, fg=FG_DIM)
-        lbl.pack(pady=(px(24), px(10)))
+        lbl.pack(pady=(px(8), px(10)))
         track = tk.Frame(dlg, bg=DOT_WAIT, height=px(6), width=px(320))
         track.pack()
         track.pack_propagate(False)
@@ -2031,6 +2010,7 @@ try {{
         }}
     }}
     'COPY_DONE' | Out-File $log -Append -Encoding UTF8
+    Remove-Item -LiteralPath '{errlog}' -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath '{exe}') {{
         'LAUNCH' | Out-File $log -Append -Encoding UTF8
         Start-Process -FilePath '{exe}'
@@ -2043,8 +2023,18 @@ try {{
     Copy-Item -LiteralPath $log -Destination '{errlog}' -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath '{exe}') {{ Start-Process -FilePath '{exe}' }}
 }}
-Start-Sleep -Seconds 3
-Remove-Item -Path (Split-Path $log) -Recurse -Force -ErrorAction SilentlyContinue
+# 받은 파일(zip·압축 해제본·이 스크립트)은 PC 에 남기지 않는다. 실행 중인
+# 스크립트가 자기 폴더를 지우면 실패할 수 있어 별도 프로세스로 떼어낸다.
+$tmp = Split-Path $log
+$ps = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+if (Test-Path -LiteralPath $ps) {{
+    Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @(
+        '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+        "Start-Sleep -Seconds 6; Remove-Item -LiteralPath '$tmp' -Recurse -Force -ErrorAction SilentlyContinue")
+}} else {{
+    Start-Sleep -Seconds 3
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+}}
 """
                 ps1_path = tmp_dir / 'update_apply.ps1'
                 ps1_path.write_text(ps1, encoding='utf-8-sig')
