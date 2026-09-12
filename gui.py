@@ -262,7 +262,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 import crawler
 from crawler import get_blog_info, get_blog_posts, random_delay, search_rank, is_blog_private, resolve_blog_id, BotBlockedError
 
-VERSION = "v1.3.24"
+VERSION = "v1.3.25"
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config_rank.ini")
 IDS_FILE = os.path.join(BASE_DIR, "blog_ids.txt")
