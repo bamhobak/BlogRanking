@@ -262,7 +262,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 import crawler
 from crawler import get_blog_info, get_blog_posts, random_delay, search_rank, is_blog_private, resolve_blog_id, BotBlockedError
 
-VERSION = "v1.3.22"
+VERSION = "v1.3.23"
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config_rank.ini")
 IDS_FILE = os.path.join(BASE_DIR, "blog_ids.txt")
@@ -1984,6 +1984,11 @@ Start-Sleep -Seconds 2
 $src = '{src}'
 $dst = '{dst}'
 $log = '{log}'
+# onefile 앱이 물려준 PyInstaller 변수(_MEIPASS2 등)를 지운다. 그대로 두면
+# 새 exe 가 '이미 압축 해제됐다'고 착각해 구버전 임시폴더의 python DLL 을
+# 찾다가 죽는다("Failed to load Python DLL").
+Get-ChildItem Env: | Where-Object {{ $_.Name -like '_PYI*' -or $_.Name -eq '_MEIPASS2' }} |
+    ForEach-Object {{ Remove-Item -LiteralPath ('Env:' + $_.Name) -ErrorAction SilentlyContinue }}
 'START' | Out-File $log -Encoding UTF8
 try {{
     # robocopy: 경로 문자열 계산 없이 트리 복사 (설정 파일은 덮어쓰지 않음)
@@ -2047,6 +2052,11 @@ if (Test-Path -LiteralPath $ps) {{
 
     def _launch_updater(self, ps1_path):
         try:
+            # ShellExecuteW 는 지금 프로세스의 환경을 그대로 물려준다.
+            # PyInstaller 변수가 따라가면 새 exe 가 부팅에 실패한다.
+            for key in [k for k in os.environ
+                        if k.startswith('_PYI') or k == '_MEIPASS2']:
+                os.environ.pop(key, None)
             args = ('-NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden '
                     f'-File "{ps1_path}"')
             ret = ctypes.windll.shell32.ShellExecuteW(
