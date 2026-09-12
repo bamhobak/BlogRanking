@@ -262,7 +262,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 import crawler
 from crawler import get_blog_info, get_blog_posts, random_delay, search_rank, is_blog_private, resolve_blog_id, BotBlockedError
 
-VERSION = "v1.3.19"
+VERSION = "v1.3.20"
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config_rank.ini")
 IDS_FILE = os.path.join(BASE_DIR, "blog_ids.txt")
@@ -1996,6 +1996,8 @@ class BlogRankingApp:
                 log = str(log_path).replace("'", "''")
                 exe = str(cur / _EXE_NAME).replace("'", "''")
                 keep = ' '.join(_KEEP_FILES)
+                keep_ps = ', '.join(f"'{f}'" for f in _KEEP_FILES)
+                errlog = str(cur / 'update_error.log').replace("'", "''")
 
                 ps1 = f"""$appPid = {os.getpid()}
 try {{ Wait-Process -Id $appPid -Timeout 60 -ErrorAction SilentlyContinue }} catch {{}}
@@ -2006,8 +2008,28 @@ $log = '{log}'
 'START' | Out-File $log -Encoding UTF8
 try {{
     # robocopy: 경로 문자열 계산 없이 트리 복사 (설정 파일은 덮어쓰지 않음)
-    robocopy $src $dst /E /R:3 /W:2 /XF {keep} | Out-Null
-    if ($LASTEXITCODE -ge 8) {{ throw "robocopy failed: $LASTEXITCODE" }}
+    # 이름이 아니라 절대경로로 부른다 — PATH 에 %SystemRoot% 가 확장 안 된 채
+    # 들어간 PC 에서는 'robocopy' 를 못 찾아 업데이트가 조용히 실패한다.
+    $rc = Join-Path $env:SystemRoot 'System32\Robocopy.exe'
+    if (Test-Path -LiteralPath $rc) {{
+        & $rc $src $dst /E /R:3 /W:2 /XF {keep} | Out-Null
+        if ($LASTEXITCODE -ge 8) {{ throw "robocopy failed: $LASTEXITCODE" }}
+    }} else {{
+        # robocopy 가 없는 PC 폴백: 설정 파일만 빼고 직접 복사
+        'NO_ROBOCOPY' | Out-File $log -Append -Encoding UTF8
+        $skip = @({keep_ps})
+        Get-ChildItem -LiteralPath $src -Recurse -File | ForEach-Object {{
+            if ($skip -notcontains $_.Name) {{
+                $rel = $_.FullName.Substring($src.Length).TrimStart('\')
+                $to = Join-Path $dst $rel
+                $dir = Split-Path $to -Parent
+                if (-not (Test-Path -LiteralPath $dir)) {{
+                    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                }}
+                Copy-Item -LiteralPath $_.FullName -Destination $to -Force
+            }}
+        }}
+    }}
     'COPY_DONE' | Out-File $log -Append -Encoding UTF8
     if (Test-Path -LiteralPath '{exe}') {{
         'LAUNCH' | Out-File $log -Append -Encoding UTF8
@@ -2017,6 +2039,9 @@ try {{
     }}
 }} catch {{
     "ERROR: $_" | Out-File $log -Append -Encoding UTF8
+    # 실패하면 앱 폴더에 로그를 남기고(원인 추적용) 구버전이라도 다시 띄운다
+    Copy-Item -LiteralPath $log -Destination '{errlog}' -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath '{exe}') {{ Start-Process -FilePath '{exe}' }}
 }}
 Start-Sleep -Seconds 3
 Remove-Item -Path (Split-Path $log) -Recurse -Force -ErrorAction SilentlyContinue
