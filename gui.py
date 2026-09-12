@@ -2010,7 +2010,7 @@ try {{
     # robocopy: 경로 문자열 계산 없이 트리 복사 (설정 파일은 덮어쓰지 않음)
     # 이름이 아니라 절대경로로 부른다 — PATH 에 %SystemRoot% 가 확장 안 된 채
     # 들어간 PC 에서는 'robocopy' 를 못 찾아 업데이트가 조용히 실패한다.
-    $rc = Join-Path $env:SystemRoot 'System32\Robocopy.exe'
+    $rc = Join-Path $env:SystemRoot 'System32\\Robocopy.exe'
     if (Test-Path -LiteralPath $rc) {{
         & $rc $src $dst /E /R:3 /W:2 /XF {keep} | Out-Null
         if ($LASTEXITCODE -ge 8) {{ throw "robocopy failed: $LASTEXITCODE" }}
@@ -2020,7 +2020,7 @@ try {{
         $skip = @({keep_ps})
         Get-ChildItem -LiteralPath $src -Recurse -File | ForEach-Object {{
             if ($skip -notcontains $_.Name) {{
-                $rel = $_.FullName.Substring($src.Length).TrimStart('\')
+                $rel = $_.FullName.Substring($src.Length).TrimStart('\\')
                 $to = Join-Path $dst $rel
                 $dir = Split-Path $to -Parent
                 if (-not (Test-Path -LiteralPath $dir)) {{
