@@ -262,7 +262,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 import crawler
 from crawler import get_blog_info, get_blog_posts, random_delay, search_rank, is_blog_private, resolve_blog_id, BotBlockedError
 
-VERSION = "v1.3.25"
+VERSION = "v1.3.26"
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config_rank.ini")
 IDS_FILE = os.path.join(BASE_DIR, "blog_ids.txt")
@@ -1612,7 +1612,8 @@ class BlogRankingApp:
                     random_delay(o['ds'], o['de'])
                     rank, hits, adult = search_rank(
                         title, blog_id, max_rank=o['cr'], search_type=stype,
-                        extra_ids=extra, page_delay=(o['ss'], o['se']))
+                        extra_ids=extra, page_delay=(o['ss'], o['se']),
+                        log_no=post.get('logNo'))
                     item['rank' + k]  = rank if rank > 0 else 0
                     item['hits' + k]  = hits
                     item['adult' + k] = adult

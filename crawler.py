@@ -542,10 +542,13 @@ def search_rank(
     search_type: str = '블로그',
     extra_ids: set = None,
     page_delay: tuple = (3, 7),
+    log_no=None,
 ) -> tuple:
     """
-    네이버에서 title 검색 후 blog_id의 순위를 반환.
+    네이버에서 title 검색 후 그 글의 순위를 반환.
     extra_ids: 원본/리다이렉트 아이디 등 추가로 매칭할 아이디 집합.
+    log_no: 찾는 글의 글번호. 주면 '그 글' 만 순위로 인정한다. 안 주면
+            예전처럼 같은 아이디의 아무 글이나 맞다고 본다(하위 호환).
     Returns: (rank, hits, adult)
       rank  : 0 이면 max_rank 안에 없음
       hits  : 첫 페이지가 꽉 차지 않았을 때 그 제목의 전체 결과 수 (아니면 None)
@@ -557,6 +560,9 @@ def search_rank(
     blog_ids = {blog_id.lower()}
     if extra_ids:
         blog_ids.update(bid.lower() for bid in extra_ids)
+    # 아이디만 맞으면 잡히던 문제: 검색한 제목의 글은 누락됐는데 같은 블로그의
+    # 다른 글이 떠 있어도 순위로 세어졌다. 글번호까지 같아야 그 글로 본다.
+    want_log = str(log_no) if log_no else ''
     # 한 번 요청에 실제로 몇 개가 오는지는 검색유형·키워드마다 다르다(블로그 30,
     # 인기글 29~30, 신뢰도 20 안팎). 받은 개수만큼 start 를 밀어서 페이지를 넘긴다.
     start = 1
@@ -597,10 +603,10 @@ def search_rank(
                 if n < full:
                     hits = n
 
-        for i, (bid, _) in enumerate(posts, start):
+        for i, (bid, logno) in enumerate(posts, start):
             if i > max_rank:
                 return 0, hits, adult
-            if bid in blog_ids:
+            if bid in blog_ids and (not want_log or logno == want_log):
                 return i, hits, adult
 
         if not posts:
