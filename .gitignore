@@ -17,3 +17,5 @@ make_icon.py
 test_*.ico
 test_*.png
 test2.ico
+update_try.json
+update_error.log

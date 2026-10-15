@@ -1,11 +1,13 @@
 import base64
 import configparser
 import ctypes
+import json
 import os
 import re
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -262,7 +264,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 import crawler
 from crawler import get_blog_info, get_blog_posts, random_delay, search_rank, is_blog_private, resolve_blog_id, BotBlockedError
 
-VERSION = "v1.3.27"
+VERSION = "v1.3.28"
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config_rank.ini")
 IDS_FILE = os.path.join(BASE_DIR, "blog_ids.txt")
@@ -275,6 +277,10 @@ _ASSET_NAME  = 'BlogRanking.zip'
 _EXE_NAME    = 'BlogRanking.exe'
 # 덮어쓸 때 건드리지 않을 파일(사용자 설정)
 _KEEP_FILES  = ('config_rank.ini', 'blog_ids.txt')
+# 업데이트를 시도한 흔적. 적용에 실패했는데 또 시도하면 구버전이 계속 다시
+# 뜨는 무한 재실행이 된다 — 같은 버전은 이 시간 동안 다시 시도하지 않는다.
+_TRY_FILE    = os.path.join(BASE_DIR, 'update_try.json')
+_TRY_COOLDOWN = 1800        # 초 (30분)
 
 # 인기글 탭 주소 — !tamper 계열 유저스크립트 "Naver 인기글 조회"(네이버 인기글 조회/
 # naver-popular-rank.user.js)의 TEMPLATE을 그대로 옮긴 것. 인기글은 독립 탭 주소가 없고
@@ -1868,6 +1874,26 @@ class BlogRankingApp:
         except Exception:
             pass
 
+    @staticmethod
+    def _update_on_cooldown(latest: str) -> bool:
+        """바로 전에 같은 버전으로 업데이트하려다 실패했으면 True."""
+        try:
+            with open(_TRY_FILE, encoding='utf-8') as f:
+                mark = json.load(f)
+        except Exception:
+            return False
+        if mark.get('version') != latest:
+            return False
+        return (time.time() - float(mark.get('time', 0))) < _TRY_COOLDOWN
+
+    @staticmethod
+    def _mark_update_try(latest: str):
+        try:
+            with open(_TRY_FILE, 'w', encoding='utf-8') as f:
+                json.dump({'version': latest, 'time': time.time()}, f)
+        except OSError:
+            pass
+
     def _check_for_update(self):
         """시작할 때 한 번, 백그라운드로 최신 릴리스를 확인한다.
 
@@ -1895,6 +1921,11 @@ class BlogRankingApp:
                 if not getattr(sys, 'frozen', False):
                     self._log(f'새 버전 {latest} — 개발 환경에서는 자동 업데이트 안 함')
                     return
+                if self._update_on_cooldown(latest):
+                    self._log(f'새 버전 {latest} — 지난 시도가 실패해 이번에는 '
+                              f'건너뜁니다(30분 뒤 재시도). 계속 실패하면 '
+                              f'update_error.log 를 확인하세요')
+                    return
                 self._log(f'새 버전 {latest} 발견 — 자동 업데이트를 시작합니다')
                 self.root.after(0, lambda: self._do_update(url, latest))
             else:
@@ -1909,6 +1940,8 @@ class BlogRankingApp:
         if not url:
             self._log(f'업데이트 실패: {_ASSET_NAME} 파일을 찾을 수 없습니다')
             return
+
+        self._mark_update_try(new_version)
 
         dlg = tk.Toplevel(self.root)
         dlg.title('업데이트')
@@ -1977,11 +2010,20 @@ class BlogRankingApp:
                 exe = str(cur / _EXE_NAME).replace("'", "''")
                 keep = ' '.join(_KEEP_FILES)
                 keep_ps = ', '.join(f"'{f}'" for f in _KEEP_FILES)
+                exe_base = _EXE_NAME[:-4] if _EXE_NAME.lower().endswith('.exe') else _EXE_NAME
                 errlog = str(cur / 'update_error.log').replace("'", "''")
 
                 ps1 = f"""$appPid = {os.getpid()}
 try {{ Wait-Process -Id $appPid -Timeout 60 -ErrorAction SilentlyContinue }} catch {{}}
-Start-Sleep -Seconds 2
+# onefile 은 부모 런처가 exe 파일을 계속 잡고 있다. 자식 pid 만 기다리고 복사하면
+# 'robocopy failed: 10'(덮어쓰기 실패)이 나고 구버전이 다시 떠 무한 재실행이 된다.
+$exeBase = '{exe_base}'
+for ($i = 0; $i -lt 60; $i++) {{
+    $alive = @(Get-Process -Name $exeBase -ErrorAction SilentlyContinue)
+    if ($alive.Count -eq 0) {{ break }}
+    Start-Sleep -Milliseconds 1000
+}}
+Start-Sleep -Seconds 1
 $src = '{src}'
 $dst = '{dst}'
 $log = '{log}'
@@ -1997,8 +2039,16 @@ try {{
     # 들어간 PC 에서는 'robocopy' 를 못 찾아 업데이트가 조용히 실패한다.
     $rc = Join-Path $env:SystemRoot 'System32\\Robocopy.exe'
     if (Test-Path -LiteralPath $rc) {{
-        & $rc $src $dst /E /R:3 /W:2 /XF {keep} | Out-Null
-        if ($LASTEXITCODE -ge 8) {{ throw "robocopy failed: $LASTEXITCODE" }}
+        # 파일이 아직 잠겨 있을 수 있어 몇 번 더 두드린다
+        $code = 16
+        for ($try = 1; $try -le 5; $try++) {{
+            & $rc $src $dst /E /R:3 /W:2 /XF {keep} | Out-Null
+            $code = $LASTEXITCODE
+            if ($code -lt 8) {{ break }}
+            "RETRY $try (robocopy=$code)" | Out-File $log -Append -Encoding UTF8
+            Start-Sleep -Seconds 2
+        }}
+        if ($code -ge 8) {{ throw "robocopy failed: $code" }}
     }} else {{
         # robocopy 가 없는 PC 폴백: 설정 파일만 빼고 직접 복사
         'NO_ROBOCOPY' | Out-File $log -Append -Encoding UTF8
