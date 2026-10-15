@@ -359,6 +359,16 @@ def _is_ad(link) -> bool:
 
 _HAS_RESULT_LINK = re.compile(r'(blog|cafe)\.naver\.com')
 _CAFE_PAT        = re.compile(r'cafe\.naver\.com')
+_CAFE_POST_PAT   = re.compile(r'cafe\.naver\.com/[^/]+/\d+')
+# 2026-10-15 통합검색 개편: 결과 한 건 = 종류별 상자 하나(한 쪽 20칸).
+# 제목 span 의 class 가 난독화(매번 바뀜)돼서 headline1 로는 못 잡는다.
+_UR_ITEM_CLASSES = (
+    'fds-ugc-ur-desk',                    # 블로그·카페
+    'fds-web-doc-root',                   # 웹사이트
+    'fds-kin-ur-desk',                    # 지식인
+    'fds-video-item-2line-profile-desk',  # 동영상
+)
+_AD_TEXT_PAT     = re.compile(r'^\s*광고\s*$')
 
 
 def _extract_posts(html: str, search_type: str = '') -> list:
@@ -412,9 +422,42 @@ def _extract_posts(html: str, search_type: str = '') -> list:
                 return posts
 
     if search_type == '신뢰도':
-        # tab.ur.all은 컨테이너 중첩이 깊어 직접 자식 순회 불가.
-        # 페이지 전체 headline1 링크를 순서대로 순위 슬롯으로 카운트.
-        # 블로그 → 결과 추가, 카페/기타 → 순위 슬롯만 차지.
+        # 2026-10-15 개편: 결과 한 건이 종류별 상자 하나로 나온다(한 쪽 20칸).
+        # 상자를 문서 순서대로 세면 화면 순위와 같다.
+        # 블로그 → 결과 추가, 카페·웹사이트·지식인·동영상 → 자리만 차지,
+        # 광고 → 순위에서 제외.
+        cards, taken = [], []
+        for nd in soup.find_all(
+            lambda t: t.has_attr('class')
+            and any(k in t['class'] for k in _UR_ITEM_CLASSES)
+        ):
+            if any(nd in t.descendants for t in taken):  # 겹친 바깥 껍데기는 한 번만
+                continue
+            taken.append(nd)
+            cards.append(nd)
+        if cards:
+            for card in cards:
+                if card.find(string=_AD_TEXT_PAT):
+                    continue
+                key = ('', '')
+                for a in card.find_all('a', href=True):
+                    href = a['href']
+                    m = BLOG_PAT.search(href)
+                    if m:
+                        key = (m.group(1).lower(), m.group(2))
+                        break
+                    if _CAFE_POST_PAT.search(href):
+                        break          # 카페 — 자리만 차지
+                if key[0] and key in seen:
+                    posts.append(('', ''))   # 같은 글 재노출 — 자리만
+                elif key[0]:
+                    seen.add(key)
+                    posts.append(key)
+                else:
+                    posts.append(('', ''))
+            return posts
+
+        # 폴백: 카드가 없는 옛 화면 — 예전처럼 headline1 링크를 센다
         seen_hrefs: set = set()
         for link in soup.find_all('a'):
             href = link.get('href', '')
