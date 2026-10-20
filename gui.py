@@ -264,7 +264,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 import crawler
 from crawler import get_blog_info, get_blog_posts, random_delay, search_rank, is_blog_private, resolve_blog_id, BotBlockedError
 
-VERSION = "v1.3.29"
+VERSION = "v1.3.30"
 BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config_rank.ini")
 IDS_FILE = os.path.join(BASE_DIR, "blog_ids.txt")
@@ -458,6 +458,8 @@ class BlogRankingApp:
             'IncludeBlogRankingCount': '10',
             'UseBlogOpenCheck': 'false', 'IncludeBlogRankingCount': '10',
             'SelectedSearchGroup': '인기글', 'UseRankCheck': 'true',
+            # 성인 키워드를 대신 받아 주는 수집기 서버 (쉼표로 여러 개, 앞에서부터 시도)
+            'AdultServers': '',
         }
         for k, v in defaults.items():
             cfg['init'].setdefault(k, v)
@@ -1533,11 +1535,15 @@ class BlogRankingApp:
 
         crawler.NOTIFY = self._log      # 세션 교체·재시도를 로그에 남긴다
         crawler.reset_throttle()        # 조회마다 속도 조절을 처음부터
-        # 성인 키워드 — 성인인증 계정 쿠키가 있으면 그 세션으로 다시 조회한다
-        # (KeywordManager 와 같은 방식, 파일도 같은 .claude_api.env)
-        crawler.set_adult_cookie(crawler.load_adult_cookie(BASE_DIR))
-        if crawler.has_adult_cookie():
-            self._log('성인인증 쿠키를 찾았습니다 — 성인 키워드도 순위를 조회합니다')
+        # 성인 키워드 — 쿠키는 이 PC 에 두지 않는다. 쿠키를 가진 수집기 서버가
+        # 화면만 대신 받아 주고, 순위 세는 일은 이 프로그램이 그대로 한다.
+        # (blog-compare 와 같은 방식·같은 주소)
+        addrs = [a.strip() for a in
+                 self._cfg['init'].get('AdultServers', '').split(',') if a.strip()]
+        crawler.set_adult_servers(addrs)
+        crawler.set_adult_cookie(crawler.load_adult_cookie(BASE_DIR))   # 쿠키가 있는 PC 면 그것도 씀
+        self._log('성인 키워드는 수집기 서버에 대신 요청합니다 '
+                  f'({", ".join(addrs or crawler.ADULT_SERVERS)})')
         crawler.SHOULD_STOP = self._stop_flag.is_set   # 긴 대기 중에도 중지가 먹게
         self._save_config()
         threading.Thread(target=self._worker, args=(ids,), daemon=True).start()

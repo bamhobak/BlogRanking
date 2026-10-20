@@ -3,6 +3,7 @@ import re
 import time
 import random
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlencode as _urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -584,6 +585,43 @@ def _is_adult_filtered(html: str) -> bool:
     return bool(ADULT_PAT.search(html))
 
 
+# 수집기 서버(성인 쿠키가 있는 PC)에 '이 주소 좀 대신 받아 줘' 하고 부탁하는 길.
+# 밖에서는 이미 열린 클로드 서버(8787)의 /ad/ 전달 길로만 닿는다.
+ADULT_SERVERS = ['121.179.0.1:8787/ad', '127.0.0.1:8792']
+_adult_server_ok = None      # 한 번 통한 주소를 기억 (매번 다 두드리지 않게)
+
+
+def set_adult_servers(addrs):
+    """설정으로 주소를 바꿀 수 있게."""
+    global ADULT_SERVERS, _adult_server_ok
+    if addrs:
+        ADULT_SERVERS = list(addrs)
+        _adult_server_ok = None
+
+
+def _fetch_via_server(url: str) -> str:
+    """성인 쿠키를 가진 수집기 서버가 대신 받아 준 화면을 가져온다.
+    순위를 세는 일은 여기(부탁한 쪽)서 그대로 한다.
+    못 닿으면 '' 를 돌려준다(그러면 호출부가 '성인'으로 표시한다)."""
+    global _adult_server_ok
+    import urllib.parse as _up
+    order = ([_adult_server_ok] if _adult_server_ok else []) + \
+            [a for a in ADULT_SERVERS if a != _adult_server_ok]
+    for addr in order:
+        try:
+            ask = f'http://{addr}/get?url=' + _up.quote(url, safe='')
+            r = requests.get(ask, timeout=60)
+            if r.status_code != 200:
+                continue
+            d = _json.loads(r.text)
+            if d.get('ok') and d.get('html'):
+                _adult_server_ok = addr
+                return d['html']
+        except Exception:
+            continue
+    return ''
+
+
 def load_adult_cookie(base_dir) -> dict:
     """KM 과 같은 파일(.claude_api.env)의 NAVER_NID_AUT/NAVER_NID_SES 를 읽는다."""
     import os
@@ -681,23 +719,34 @@ def search_rank(
             # 성인 키워드로 알려진 것은 처음부터 로그인 세션으로
             use_login = last_was_adult and _ADULT_SESSION is not None
             resp = _fetch(url, params, session=_ADULT_SESSION if use_login else None)
-            if _adult_blocked(resp.text, search_type):
+            html = resp.text
+            if _adult_blocked(html, search_type):
                 last_was_adult = True
                 if not use_login and _ADULT_SESSION is not None:
-                    # 몰랐던 성인 키워드 — 로그인 세션으로 다시
+                    # 이 PC 에 쿠키가 있으면(드묾) 로그인 세션으로 다시
                     resp = _fetch(url, params, session=_ADULT_SESSION)
-                if _adult_blocked(resp.text, search_type):
-                    adult_blocked = True     # 끝까지 못 봄 → '성인'으로 표시
+                    html = resp.text
+                if _adult_blocked(html, search_type):
+                    # 쿠키는 이 PC 에 두지 않는다 — 쿠키를 가진 수집기 서버에 대신 부탁
+                    got = ''
+                    if 'search.naver.com/search.naver' in url:   # 서버가 받아 주는 주소만
+                        got = _fetch_via_server(
+                            url + '?' + _urlencode(params))
+                    if got and not _adult_blocked(got, search_type):
+                        html = got
+                        _say('  성인 키워드 — 수집기 서버가 대신 받아 줌')
+                    else:
+                        adult_blocked = True   # 끝까지 못 봄 → '성인'으로 표시
         except BotBlockedError:
             raise
         except Exception:
             break
 
-        posts = _extract_posts(_unwrap_search_html(resp.text, search_type), search_type)
+        posts = _extract_posts(_unwrap_search_html(html, search_type), search_type)
 
         if first:
             first = False
-            page_html = _unwrap_search_html(resp.text, search_type)
+            page_html = _unwrap_search_html(html, search_type)
             full = FULL_PAGE.get(search_type)
             if full:
                 n = _result_count(page_html, search_type)
