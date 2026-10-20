@@ -150,21 +150,23 @@ def _rotate_session():
     _req_count = 0
 
 
-def _fetch(url: str, params: dict, timeout: int = 15):
+def _fetch(url: str, params: dict, timeout: int = 15, session=None):
     """검색 요청 한 번. 상한이 가까우면 미리 세션을 갈아타고,
-    막히면 쉬었다가 새 세션으로 다시 시도한다."""
+    막히면 쉬었다가 새 세션으로 다시 시도한다.
+    session 을 주면(성인인증 로그인 세션) 그 세션으로만 보내고 교체하지 않는다."""
     global _req_count, _extra, _ok_run
     fast_i = cap_i = 0
     while True:
         _init_session()
-        if _req_count >= ROTATE_AT:
+        if session is None and _req_count >= ROTATE_AT:
             _say(f"  세션 교체 (요청 {_req_count}회)")
             _rotate_session()
         if _extra and not _sleep(_extra):
             raise BotBlockedError('중지됨')
         try:
-            resp = _SESSION.get(url, params=params, timeout=timeout)
-            _req_count += 1
+            resp = (session or _SESSION).get(url, params=params, timeout=timeout)
+            if session is None:
+                _req_count += 1
             _check_bot_block(resp)
             resp.raise_for_status()
             _ok_run += 1
@@ -560,12 +562,57 @@ def is_blog_private(blog_id: str) -> bool:
 FULL_PAGE = {'블로그': 30, '인기글': 29}
 
 
-# 성인 인증이 필요해 결과가 걸러진 경우 이 안내가 붙는다.
+# ── 성인 키워드 (KeywordManager 와 같은 방식) ────────────────────────────────
+# 로그인 안 하면 결과 대신 이 문구만 나온다(블로그·통합검색 모두 0칸).
+_ADULT_MARK = '청소년에게 노출하기 부적합한 검색결과를 제외'
+# 옛 문구 판정(폴백용) — 띄어쓰기가 달라질 때를 대비해 남겨 둔다.
 ADULT_PAT = re.compile(r'청소년에게\s*노출하기\s*부적합')
+_ADULT_SESSION = None     # 성인인증 계정 쿠키를 담은 전용 세션 — 일반 검색과 안 섞이게
+last_was_adult = False    # 방금 조회한 제목이 성인 키워드였나
+
+
+def _adult_blocked(html: str, search_type: str) -> bool:
+    """'청소년 제외' 문구가 있고 결과가 0칸일 때만 막힌 것으로 본다.
+    (로그인돼 결과가 나오는 화면에도 문구가 섞여 있어 문구만으로는 판정하지 않는다)"""
+    if _ADULT_MARK not in html and not ADULT_PAT.search(html):
+        return False
+    return not _extract_posts(_unwrap_search_html(html, search_type), search_type)
 
 
 def _is_adult_filtered(html: str) -> bool:
+    """옛 이름 유지(문구만 보는 판정) — 새 코드는 _adult_blocked 를 쓴다."""
     return bool(ADULT_PAT.search(html))
+
+
+def load_adult_cookie(base_dir) -> dict:
+    """KM 과 같은 파일(.claude_api.env)의 NAVER_NID_AUT/NAVER_NID_SES 를 읽는다."""
+    import os
+    out = {}
+    try:
+        with open(os.path.join(base_dir, '.claude_api.env'), encoding='utf-8') as f:
+            for line in f:
+                k, _, v = line.strip().partition('=')
+                if k in ('NAVER_NID_AUT', 'NAVER_NID_SES') and v.strip():
+                    out[k[6:]] = v.strip()          # NID_AUT / NID_SES
+    except Exception:
+        pass
+    return out if len(out) == 2 else {}
+
+
+def set_adult_cookie(cookies: dict):
+    """성인 키워드용 로그인 세션 준비 (빈 dict 면 끔)."""
+    global _ADULT_SESSION
+    if not cookies:
+        _ADULT_SESSION = None
+        return
+    sess = _mk_session()
+    for k, v in cookies.items():
+        sess.cookies.set(k, v, domain='.naver.com')
+    _ADULT_SESSION = sess
+
+
+def has_adult_cookie() -> bool:
+    return _ADULT_SESSION is not None
 
 
 def _result_count(html: str, search_type: str) -> int:
@@ -586,6 +633,7 @@ def search_rank(
     extra_ids: set = None,
     page_delay: tuple = (3, 7),
     log_no=None,
+    adult: bool = False,
 ) -> tuple:
     """
     네이버에서 title 검색 후 그 글의 순위를 반환.
@@ -595,11 +643,15 @@ def search_rank(
     Returns: (rank, hits, adult)
       rank  : 0 이면 max_rank 안에 없음
       hits  : 첫 페이지가 꽉 차지 않았을 때 그 제목의 전체 결과 수 (아니면 None)
-      adult : 성인 인증이 필요해 결과가 걸러졌으면 True
+      adult : 성인 인증이 필요해 결과를 못 본 경우 True
+              (성인인증 쿠키가 있으면 그 세션으로 다시 조회해 실제 순위를 낸다)
+    adult(인자): 이미 성인 키워드로 알려진 제목이면 True — 처음부터 로그인 세션으로 간다.
     """
+    global last_was_adult
     _init_session()
     hits = None       # 첫 페이지가 꽉 차지 않았을 때만 채운다(0 도 유효한 값)
-    adult = False
+    last_was_adult = bool(adult)
+    adult_blocked = False
     blog_ids = {blog_id.lower()}
     if extra_ids:
         blog_ids.update(bid.lower() for bid in extra_ids)
@@ -626,7 +678,16 @@ def search_rank(
                 url = 'https://search.naver.com/search.naver'
                 params = {'ssc': 'tab.blog.all', 'sm': 'tab_opt',
                           'query': title, 'start': start}
-            resp = _fetch(url, params)
+            # 성인 키워드로 알려진 것은 처음부터 로그인 세션으로
+            use_login = last_was_adult and _ADULT_SESSION is not None
+            resp = _fetch(url, params, session=_ADULT_SESSION if use_login else None)
+            if _adult_blocked(resp.text, search_type):
+                last_was_adult = True
+                if not use_login and _ADULT_SESSION is not None:
+                    # 몰랐던 성인 키워드 — 로그인 세션으로 다시
+                    resp = _fetch(url, params, session=_ADULT_SESSION)
+                if _adult_blocked(resp.text, search_type):
+                    adult_blocked = True     # 끝까지 못 봄 → '성인'으로 표시
         except BotBlockedError:
             raise
         except Exception:
@@ -637,7 +698,6 @@ def search_rank(
         if first:
             first = False
             page_html = _unwrap_search_html(resp.text, search_type)
-            adult = _is_adult_filtered(page_html)
             full = FULL_PAGE.get(search_type)
             if full:
                 n = _result_count(page_html, search_type)
@@ -648,9 +708,9 @@ def search_rank(
 
         for i, (bid, logno) in enumerate(posts, start):
             if i > max_rank:
-                return 0, hits, adult
+                return 0, hits, adult_blocked
             if bid in blog_ids and (not want_log or logno == want_log):
-                return i, hits, adult
+                return i, hits, adult_blocked
 
         if not posts:
             break
@@ -668,4 +728,4 @@ def search_rank(
         # 제목과 제목 사이 딜레이와 네이버가 보는 기준이 달라 따로 둔다.
         random_delay(page_delay[0], page_delay[1])
 
-    return 0, hits, adult
+    return 0, hits, adult_blocked
