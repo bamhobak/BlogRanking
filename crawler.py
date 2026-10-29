@@ -3,6 +3,7 @@ import re
 import time
 import random
 from email.utils import parsedate_to_datetime
+from html import unescape as _unescape
 
 import requests
 from bs4 import BeautifulSoup
@@ -150,7 +151,7 @@ def _rotate_session():
     _req_count = 0
 
 
-def _fetch(url: str, params: dict, timeout: int = 15):
+def _fetch(url: str, params: dict, timeout: int = 15, headers: dict = None):
     """검색 요청 한 번. 상한이 가까우면 미리 세션을 갈아타고,
     막히면 쉬었다가 새 세션으로 다시 시도한다."""
     global _req_count, _extra, _ok_run
@@ -163,7 +164,8 @@ def _fetch(url: str, params: dict, timeout: int = 15):
         if _extra and not _sleep(_extra):
             raise BotBlockedError('중지됨')
         try:
-            resp = _SESSION.get(url, params=params, timeout=timeout)
+            resp = _SESSION.get(url, params=params, timeout=timeout,
+                                headers=headers)
             _req_count += 1
             _check_bot_block(resp)
             resp.raise_for_status()
@@ -578,6 +580,32 @@ def _result_count(html: str, search_type: str) -> int:
     return -1   # 그 외는 호출부에서 _extract_posts 결과 길이를 쓴다
 
 
+# 블로그탭 31위부터 — 2026-10-29 실측: search.naver.com 은 start 를 무시하고
+# 늘 1~30위를 준다. 화면이 스크롤할 때 부르는 API 주소와 X-Prs-Query-Info 값이
+# 1쪽 HTML 에 함께 박혀 있다. 이 머리글을 빼면 200 은 오지만 앞쪽 글이 섞인다.
+_BLOG_MORE_PAT = re.compile(
+    r'url:"(https?://s\.search\.naver\.com/p/review/[^"]+)",'
+    r'headers:\{"X-Prs-Query-Info":"([^"]*)"'
+)
+
+
+def _blog_more_start(html: str):
+    """1쪽 HTML → (다음 쪽 주소, X-Prs-Query-Info). 없으면 (None, '')."""
+    m = _BLOG_MORE_PAT.search(html)
+    return (_unescape(m.group(1)), m.group(2)) if m else (None, '')
+
+
+def _fetch_blog_more(url: str, prs: str):
+    """블로그탭 다음 30개. (html, 그다음 주소) — 같은 값을 끝까지 쓴다."""
+    resp = _fetch(url, None, headers={
+        'Referer': 'https://search.naver.com/',
+        'X-Prs-Query-Info': prs,
+    })
+    d = _json.loads(resp.text)
+    html = ''.join(c.get('html', '') for c in d.get('collection') or [])
+    return html, d.get('url')
+
+
 def search_rank(
     title: str,
     blog_id: str,
@@ -610,33 +638,44 @@ def search_rank(
     # 인기글 29~30, 신뢰도 20 안팎). 받은 개수만큼 start 를 밀어서 페이지를 넘긴다.
     start = 1
     first = True
+    more = (None, '')     # 블로그탭 다음 쪽 (주소, X-Prs-Query-Info)
     while start <= max_rank:
         try:
-            if search_type == '인기글':
-                url = 'https://s.search.naver.com/p/review/50/search.naver'
-                params = {'query': title, 'ssc': 'tab.itb.all',
-                          'sm': 'tab_hty.brg', 'start': start, 'api_type': 5}
-            elif search_type == '신뢰도':
-                # page 파라미터는 효과 없음 — start만 결과를 제어
-                # start=1 → 1위~20위, start=21 → 21위~40위, ..., start=161 → 161위~180위
-                url = 'https://search.naver.com/search.naver'
-                params = {'query': title, 'ssc': 'tab.ur.all',
-                          'sm': 'tab_pge', 'start': start}
-            else:  # 블로그
-                url = 'https://search.naver.com/search.naver'
-                params = {'ssc': 'tab.blog.all', 'sm': 'tab_opt',
-                          'query': title, 'start': start}
-            resp = _fetch(url, params)
+            if search_type == '블로그' and start > 1:
+                # 블로그탭은 start 를 무시한다 — 31위부터는 더보기 API 로만 나온다
+                if not more[0]:
+                    break
+                html, nxt = _fetch_blog_more(*more)
+                more = (nxt, more[1])
+            else:
+                if search_type == '인기글':
+                    url = 'https://s.search.naver.com/p/review/50/search.naver'
+                    params = {'query': title, 'ssc': 'tab.itb.all',
+                              'sm': 'tab_hty.brg', 'start': start, 'api_type': 5}
+                elif search_type == '신뢰도':
+                    # page 파라미터는 효과 없음 — start만 결과를 제어
+                    # start=1 → 1위~20위, start=21 → 21위~40위, ..., start=161 → 161위~180위
+                    url = 'https://search.naver.com/search.naver'
+                    params = {'query': title, 'ssc': 'tab.ur.all',
+                              'sm': 'tab_pge', 'start': start}
+                else:  # 블로그 1쪽
+                    url = 'https://search.naver.com/search.naver'
+                    params = {'ssc': 'tab.blog.all', 'sm': 'tab_opt',
+                              'query': title, 'start': start}
+                resp = _fetch(url, params)
+                html = resp.text
+                if search_type == '블로그':
+                    more = _blog_more_start(html)
         except BotBlockedError:
             raise
         except Exception:
             break
 
-        posts = _extract_posts(_unwrap_search_html(resp.text, search_type), search_type)
+        posts = _extract_posts(_unwrap_search_html(html, search_type), search_type)
 
         if first:
             first = False
-            page_html = _unwrap_search_html(resp.text, search_type)
+            page_html = _unwrap_search_html(html, search_type)
             adult = _is_adult_filtered(page_html)
             full = FULL_PAGE.get(search_type)
             if full:
@@ -656,7 +695,7 @@ def search_rank(
             break
         # 꽉 찬 페이지인지는 화면에 실제로 걸린 결과 수로 본다.
         # 광고는 순위에서 빼므로 len(posts) 로 재면 꽉 찬 페이지도 모자라 보인다.
-        page_n = _result_count(_unwrap_search_html(resp.text, search_type), search_type)
+        page_n = _result_count(_unwrap_search_html(html, search_type), search_type)
         if page_n < 0:
             page_n = len(posts)
         # (신뢰도는 슬롯 수가 유동적이라 제외)
